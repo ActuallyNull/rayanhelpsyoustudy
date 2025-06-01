@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Add the custom styles from your index.html's <style> tag if needed */
+/* For example, the .loader animation */
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Apply it to a class used by LoadingSpinner or directly if preferred */
+.loader-animation {
+  animation: spin 1s linear infinite;
+}
+
+/* Option button transitions if you want them globally */
+.option-button {
+  transition: all 0.2s ease-in-out;
+}
+.option-button:hover:not(:disabled) { /* Ensure hover effect only on non-disabled */
+  transform: translateY(-2px);
+}
+
+/* You had specific .correct, .incorrect, .selected classes.
+   These are now handled dynamically with Tailwind classes in the components.
+   If you prefer global classes, define them here.
+*/
