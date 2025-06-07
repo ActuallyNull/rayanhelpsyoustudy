@@ -1,12 +1,14 @@
 // pages/index.js
 
 import Head from 'next/head';
+import Link from 'next/link';
 import { useState, useEffect, useRef } from 'react';
 import { auth } from '@/lib/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import LoadingSpinner from '@/components/LoadingSpinner';
 import Modal from '@/components/Modal';
 import { useRouter } from 'next/router';
+import JSZip from 'jszip';
 
 // For PDF.js
 let pdfjsLib = null; // Renaming to avoid confusion with the module object
@@ -40,6 +42,75 @@ if (typeof window !== 'undefined') {
     });
 }
 
+// Function to extract text from PPTX
+async function extractTextFromPptx(file) {
+  const zip = new JSZip();
+  const content = await zip.loadAsync(file);
+  let fullText = "";
+
+  // Regex to find text nodes in slide XML: <a:t>TEXT_HERE</a:t>
+  // This is a simplified approach and might need refinement for complex PPTX files
+  // (e.g., text in shapes, tables, SmartArt, notes pages)
+  const textNodeRegex = /<a:t.*?>(.*?)<\/a:t>/g;
+  const notesTextNodeRegex = /<p:txBody>.*?<a:t.*?>(.*?)<\/a:t>.*?<\/p:txBody>/gs; // More specific for notes
+
+  const slidePromises = [];
+  const notesPromises = [];
+
+  // Iterate over slide files (e.g., ppt/slides/slide1.xml, slide2.xml, etc.)
+  for (const filePath in content.files) {
+    if (filePath.startsWith("ppt/slides/slide") && filePath.endsWith(".xml")) {
+      slidePromises.push(content.files[filePath].async("string"));
+    }
+    if (filePath.startsWith("ppt/notesSlides/notesSlide") && filePath.endsWith(".xml")) {
+        notesPromises.push(content.files[filePath].async("string"));
+    }
+  }
+
+  const slideContents = await Promise.all(slidePromises);
+  slideContents.forEach(slideXml => {
+    let match;
+    while ((match = textNodeRegex.exec(slideXml)) !== null) {
+      // Basic unescaping for common XML entities, can be expanded
+      const textContent = match[1]
+                            .replace(/</g, '<')
+                            .replace(/>/g, '>')
+                            .replace(/&/g, '&')
+                            .replace(/"/g, '"')
+                            .replace(/'/g, "'");
+      fullText += textContent + " ";
+    }
+    fullText += "\n"; // Add a newline after each slide's text
+  });
+
+  const notesContents = await Promise.all(notesPromises);
+  if (notesContents.length > 0) {
+    fullText += "\n--- Speaker Notes ---\n";
+    notesContents.forEach(notesXml => {
+        let match;
+        // A more robust way to get all text within txBody for notes
+        const txBodyRegex = /<p:txBody>(.*?)<\/p:txBody>/gs;
+        while((match = txBodyRegex.exec(notesXml)) !== null) {
+            let textContent = "";
+            let innerMatch;
+            while((innerMatch = textNodeRegex.exec(match[1])) !== null) {
+                textContent += innerMatch[1] + " ";
+            }
+            if (textContent.trim()) {
+                 fullText += textContent.trim()
+                                .replace(/</g, '<')
+                                .replace(/>/g, '>')
+                                .replace(/&/g, '&')
+                                .replace(/"/g, '"')
+                                .replace(/'/g, "'") + "\n";
+            }
+        }
+    });
+  }
+
+
+  return fullText.trim();
+}
 
 export default function StudyPage() {
   const router = useRouter();
@@ -123,8 +194,14 @@ export default function StudyPage() {
             router.push('/');
             return;
         }
-        setCurrentPdfText(session.pdfText);
-        setExtractedCategories(session.categories);
+        // Assuming session.pdfText now stores generic file text
+        setCurrentPdfText(session.pdfText); // Use setCurrentPdfText (or rename to setCurrentFileText)
+        
+        let sessionCategories = session.categories || [];
+        if (!sessionCategories.includes("All")) {
+            sessionCategories = ["All", ...sessionCategories];
+        }
+        setExtractedCategories(sessionCategories);
         setCurrentSessionId(session._id);
         setFileName(session.fileName);
         if (session.lastDifficulty) getSetLastDifficulty(session.lastDifficulty);
@@ -148,61 +225,88 @@ export default function StudyPage() {
     const file = event.target.files[0];
     if (!file) return;
 
-    if (!pdfjsLib || !pdfjsLib.getDocument) { // More robust check
-        showModal("PDF Library Error", "PDF.js library is not ready or getDocument is not available. Please wait a moment and try again, or check console for errors.");
-        console.error("pdfjsLib status:", pdfjsLib);
-        return;
-    }
-
     setFileName(file.name);
     setIsLoading(true);
-    setLoadingMessage(`Extracting text from ${file.name}...`);
+    let extractedText = "";
+    let fileTypeForAI = "document"; // Generic term for AI prompt
 
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-      let text = "";
-      for (let i = 1; i <= pdfDoc.numPages; i++) {
-        const page = await pdfDoc.getPage(i);
-        const textContent = await page.getTextContent();
-        text += textContent.items.map(item => item.str).join(" ") + "\n";
+      if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+        setLoadingMessage(`Extracting text from PDF: ${file.name}...`);
+        if (!pdfjsLib || !pdfjsLib.getDocument) {
+            showModal("PDF Library Error", "PDF.js library is not ready. Please wait and try again.");
+            setIsLoading(false); return;
+        }
+        const arrayBuffer = await file.arrayBuffer();
+        const pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        for (let i = 1; i <= pdfDoc.numPages; i++) {
+          const page = await pdfDoc.getPage(i);
+          const textContent = await page.getTextContent();
+          extractedText += textContent.items.map(item => item.str).join(" ") + "\n";
+        }
+        fileTypeForAI = "PDF document";
+      } else if (file.type === "application/vnd.openxmlformats-officedocument.presentationml.presentation" || file.name.toLowerCase().endsWith(".pptx")) {
+        setLoadingMessage(`Extracting text from PowerPoint: ${file.name}...`);
+        extractedText = await extractTextFromPptx(file);
+        fileTypeForAI = "PowerPoint presentation";
+      } else {
+        showModal("Unsupported File Type", "Please upload a PDF (.pdf) or PowerPoint (.pptx) file.");
+        setIsLoading(false); return;
       }
-      setCurrentPdfText(text);
 
-      // ... (rest of your file upload logic is fine) ...
-      if (!text || text.trim().length < 50) {
-        showModal("Extraction Error", "Could not extract sufficient text. PDF might be image-based or empty.");
-        setIsLoading(false);
-        return;
+      setCurrentPdfText(extractedText); // Use this state for the extracted text, regardless of source
+
+      if (!extractedText || extractedText.trim().length < 20) { // Lowered threshold a bit for PPTX
+        showModal("Extraction Error", `Could not extract sufficient text from the ${fileTypeForAI}. It might be image-based or have minimal text content.`);
+        setIsLoading(false); return;
       }
 
-      setLoadingMessage("Identifying categories with AI...");
+      setLoadingMessage(`Identifying categories from ${fileTypeForAI}...`);
       const catResponse = await fetch('/api/ai/categorize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text: extractedText }),
       });
-      if (!catResponse.ok) {
-        const err = await catResponse.json().catch(()=>({error: "Failed to get categories from AI."}));
-        throw new Error(err.error);
+      let categoriesFromServer = [];
+      if (catResponse.ok) {
+        const catData = await catResponse.json();
+        categoriesFromServer = catData.categories || [];
+      } else {
+        console.warn("AI categorization failed or returned no categories. Defaulting to 'All'.");
       }
-      const { categories } = await catResponse.json();
 
-      if (!categories || categories.length === 0) {
-        showModal("Category Error", "AI could not identify categories. Try a different document.");
-        setIsLoading(false); // Ensure loading is stopped
-        setCurrentStep('upload'); // Go back to upload
-        return;
+      const finalCategories = ["All", ...categoriesFromServer];
+      setExtractedCategories(finalCategories);
+
+      // --- NEW: Generate flashcards right after categorization ---
+      setLoadingMessage("Generating flashcards...");
+      let flashcards = [];
+      try {
+        const flashRes = await fetch('/api/ai/generate-flashcards', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: extractedText, count: 15 }),
+        });
+        if (flashRes.ok) {
+          const { flashcards: generated } = await flashRes.json();
+          if (Array.isArray(generated)) flashcards = generated;
+        } else {
+          const err = await flashRes.json().catch(() => ({}));
+          console.warn("Flashcard generation failed:", err.error || "Unknown error");
+        }
+      } catch (err) {
+        console.warn("Flashcard generation error:", err);
       }
-      setExtractedCategories(categories);
+      // --- END NEW ---
 
       setLoadingMessage("Saving session...");
       const sessionData = {
         userId,
         fileName: file.name,
-        pdfText: text,
-        categories,
+        pdfText: extractedText,
+        categories: finalCategories,
         lastDifficulty: getSetLastDifficulty(),
+        flashcards, // <-- Save flashcards in the session!
       };
       const saveRes = await fetch('/api/sessions', {
         method: 'POST',
@@ -216,9 +320,9 @@ export default function StudyPage() {
       setCurrentStep('category');
 
     } catch (error) {
-      console.error("Error during upload:", error);
+      console.error("Error during upload and processing:", error);
       showModal("Processing Error", `An error occurred: ${error.message}`);
-      setCurrentStep('upload'); // Reset to upload on error
+      setCurrentStep('upload');
     } finally {
       setIsLoading(false);
       if(fileInputRef.current) fileInputRef.current.value = null;
@@ -247,7 +351,7 @@ export default function StudyPage() {
   const fetchAndDisplayMcqs = async (difficulty) => {
     console.log("Fetching MCQs for category:", currentSelectedCategory, "difficulty:", difficulty);
     if (!currentPdfText || !currentSelectedCategory) {
-      showModal("Error", "Missing PDF text or category selection.");
+      showModal("Error", "Missing extracted text or category selection.");
       setCurrentStep('category'); // Sensible fallback
       return;
     }
@@ -257,11 +361,23 @@ export default function StudyPage() {
     setSelectedAnswerIndex(null);
     setCurrentMcq(null); // Clear current MCQ while loading
 
+    const categoryForPrompt = currentSelectedCategory === "All" ? "the entire document" : currentSelectedCategory;
+    const requestBody = {
+        text: currentPdfText,
+        // If "All" is selected, tell the AI to use the whole document context.
+        // Otherwise, use the specific category.
+        category: categoryForPrompt,
+        difficulty,
+        count: 3
+    };
+
+    console.log("Requesting MCQs with body:", requestBody); // For debugging
+
     try {
       const mcqResponse = await fetch('/api/ai/generate-mcqs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: currentPdfText, category: currentSelectedCategory, difficulty, count: 3 }),
+        body: JSON.stringify(requestBody), // Use the modified requestBody
       });
 
       if (!mcqResponse.ok) {
@@ -335,21 +451,22 @@ export default function StudyPage() {
   // Ensure it uses the updated `currentMcq` state for display.
   console.log("Rendering page. Current step:", currentStep, "isLoading:", isLoading, "currentMcq:", currentMcq);
 
-  return (
+return (
     <>
       <Head>
         <title>Rayan Helps You Study - MCQ Generator</title>
       </Head>
       <div className="container mx-auto px-4 py-8">
-        <div className="bg-white p-6 md:p-8 rounded-xl shadow-xl min-h-[60vh]"> {/* Added min-h for consistent size */}
+        <div className="bg-white p-6 md:p-8 rounded-xl shadow-xl min-h-[60vh]"> {/* min-h for consistent size */}
           {isLoading && <LoadingSpinner message={loadingMessage} />}
 
+          {/* Upload Step */}
           {!isLoading && currentStep === 'upload' && (
             <div>
-              <h2 className="text-2xl font-semibold mb-4 text-gray-700">Upload Your Notes (PDF)</h2>
+              <h2 className="text-2xl font-semibold mb-4 text-gray-700">Upload Your Notes (PDF or PPTX)</h2>
               <input
                 type="file"
-                accept=".pdf"
+                accept=".pdf,application/pdf,.pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation"
                 onChange={handleFileUpload}
                 ref={fileInputRef}
                 className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 mb-4"
@@ -358,6 +475,7 @@ export default function StudyPage() {
             </div>
           )}
 
+          {/* Category Step */}
           {!isLoading && currentStep === 'category' && (
             <div>
               <h2 className="text-2xl font-semibold mb-4 text-gray-700">Select a Category</h2>
@@ -371,18 +489,36 @@ export default function StudyPage() {
                   ))}
                 </div>
               ) : (
-                <p className="text-gray-500">No categories identified. Please try a different PDF.</p>
+                <p className="text-gray-500">No categories identified. Please try a different file or check the console for errors during processing.</p>
               )}
               <button onClick={() => {
                 setCurrentStep('upload');
-                // Reset relevant states if needed
                 setFileName('');
                 setCurrentPdfText(null);
                 setExtractedCategories([]);
                 setCurrentSessionId(null);
+                setCurrentMcq(null);
+                setCurrentMcqBatch([]);
+                setCurrentMcqIndex(-1);
+                setQuestionsAnsweredInCategory(0);
+                setIsAnswered(false);
+                setFeedbackText('');
+                setExplanationText('');
               }} className="mt-6 bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg">
-                Upload New PDF
+                Upload New File
               </button>
+
+              {/* --- FLASHCARDS BUTTON IN CATEGORY STEP (Stays Here) --- */}
+              {currentSessionId && currentPdfText && (
+                <div className="mt-8 pt-6 border-t border-gray-200 text-center">
+                  <Link href={`/flashcards?sessionId=${currentSessionId}`} legacyBehavior>
+                    <a className="bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-3 px-6 rounded-lg text-lg transition duration-150 ease-in-out">
+                      🧠 Generate Flashcards for This Document
+                    </a>
+                  </Link>
+                </div>
+              )}
+              {/* --- END FLASHCARDS BUTTON IN CATEGORY STEP --- */}
             </div>
           )}
 
@@ -391,7 +527,7 @@ export default function StudyPage() {
               <div id="mcq-step">
                   <div className="flex justify-between items-center mb-4">
                       <h2 className="text-2xl font-semibold text-gray-700">
-                          MCQs: {currentSelectedCategory || "Select Category"}
+                          MCQs: {currentSelectedCategory || "No Category Selected"}
                       </h2>
                       <button onClick={() => {
                           setCurrentMcq(null);
@@ -401,6 +537,7 @@ export default function StudyPage() {
                           setSelectedAnswerIndex(null);
                           setFeedbackText('');
                           setExplanationText('');
+                          setQuestionsAnsweredInCategory(0);
                           setCurrentStep('category');
                       }} className="bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg text-sm">
                           Change Category
@@ -441,10 +578,10 @@ export default function StudyPage() {
                                       disabled={isAnswered}
                                       className={`w-full option-button text-left py-3 px-4 border rounded-lg shadow-sm transition-all
                                           ${isAnswered ?
-                                              (index === currentMcq.correctOptionIndex ? 'bg-green-500 !text-white border-green-600' : // Correct answer
-                                              (index === selectedAnswerIndex ? 'bg-red-500 !text-white border-red-600' : // User's incorrect selection
-                                              'bg-gray-100 text-gray-800 border-gray-300')) // Other options
-                                              : 'bg-gray-100 hover:bg-gray-200 text-gray-800 border-gray-300' // Not answered yet
+                                              (index === currentMcq.correctOptionIndex ? 'bg-green-500 !text-white border-green-600' : 
+                                              (index === selectedAnswerIndex ? 'bg-red-500 !text-white border-red-600' : 
+                                              'bg-gray-100 text-gray-800 border-gray-300')) 
+                                              : 'bg-gray-100 hover:bg-gray-200 text-gray-800 border-gray-300'
                                           }
                                           ${isAnswered ? 'cursor-not-allowed' : 'cursor-pointer'}
                                       `}
@@ -468,11 +605,11 @@ export default function StudyPage() {
                   )}
                   {!isLoading && currentStep === 'mcq' && !currentMcq && (
                       <p className="text-center text-gray-500 mt-10">
-                          Please select a difficulty level above to generate questions for "{currentSelectedCategory}".
+                          Please select a difficulty level above to generate questions for "{currentSelectedCategory || 'the selected category'}".
                       </p>
                   )}
 
-                  {currentStep === 'mcq' && (
+                  {currentStep === 'mcq' && ( 
                       <p className="text-sm text-gray-500 mt-4 text-center">
                           Questions answered in this category: {questionsAnsweredInCategory}
                       </p>
@@ -486,4 +623,5 @@ export default function StudyPage() {
       </Modal>
     </>
   );
+
 }

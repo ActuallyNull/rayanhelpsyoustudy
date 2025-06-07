@@ -1,4 +1,10 @@
+// models/Session.js
 import mongoose from 'mongoose';
+
+const FlashcardSchema = new mongoose.Schema({ // Define a sub-schema for flashcards
+    front: { type: String, required: true },
+    back: { type: String, required: true }
+}, { _id: false }); // No separate _id for sub-documents unless needed
 
 const SessionSchema = new mongoose.Schema({
     userId: {
@@ -9,7 +15,7 @@ const SessionSchema = new mongoose.Schema({
         type: String,
         required: true,
     },
-    pdfText: { // Consider if this can be very large. Might need separate storage for huge files.
+    pdfText: {
         type: String,
         required: true,
     },
@@ -17,15 +23,18 @@ const SessionSchema = new mongoose.Schema({
         type: [String],
         required: true,
     },
-    createdAt: {
-        type: Date,
-        default: Date.now,
-    },
     lastDifficulty: {
         type: String,
         default: 'medium',
+    },
+    flashcards: { // New field
+        type: [FlashcardSchema], // Array of flashcard objects
+        default: [],
+    },
+    createdAt: {
+        type: Date,
+        default: Date.now,
     }
 });
 
-// To prevent recompilation of model in dev environment
 export default mongoose.models.Session || mongoose.model('Session', SessionSchema);
