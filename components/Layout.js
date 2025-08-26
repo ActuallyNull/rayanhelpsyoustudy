@@ -32,7 +32,7 @@ export default function Layout({ children }) {
               
               {/* Can have a title here or keep it clean if sidebar has main title */}
               <h1 className="text-xl font-semibold text-gray-700 hidden lg:block">
-                Study Dashboard
+                Rayan's Study App
               </h1>
 
               <AuthStatus />

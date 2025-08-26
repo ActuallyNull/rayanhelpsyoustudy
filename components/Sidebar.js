@@ -4,7 +4,8 @@ import { useRouter } from 'next/router';
 // import { FaFileUpload, FaListAlt, FaChalkboardTeacher, FaHome } from 'react-icons/fa';
 
 const navItems = [
-  { href: '/', label: 'Home / Upload', /*icon: <FaHome />*/ },
+  { href: '/', label: 'Home', /*icon: <FaHome />*/ },
+  { href: '/study', label: 'Study Dashboard', /*icon: <FaFileUpload />*/ },
   { href: '/sessions', label: 'My Sessions', /*icon: <FaListAlt />*/ },
   { href: '/flashcards', label: 'Flashcards', /*icon: <FaChalkboardTeacher />*/ },
 ];
