@@ -11,7 +11,7 @@ export default function Document() {
         <meta charSet="UTF-8" />
         <link rel="icon" href={faviconSvg} type="image/svg+xml" />
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-        {/* pdf.js worker script - Next.js will handle serving this from public if placed there,
+        {/* pdf.mjs worker script - Next.js will handle serving this from public if placed there,
             but pdfjs-dist usually bundles its own worker.
             The webpack alias in next.config.js helps with this.
             We will set workerSrc dynamically in the component.

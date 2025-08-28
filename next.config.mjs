@@ -8,8 +8,8 @@ const nextConfig = {
   //   },
   // },
   webpack: (config) => {
-    // Required for pdf.js to work correctly with Next.js
-    config.resolve.alias['pdfjs-dist/build/pdf.js$'] = 'pdfjs-dist/build/pdf.js';
+    // Required for pdf.mjs to work correctly with Next.js
+    config.resolve.alias['pdfjs-dist/build/pdf.mjs$'] = 'pdfjs-dist/build/pdf.mjs';
     return config;
   }
 }

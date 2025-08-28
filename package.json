@@ -9,13 +9,28 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@codemirror/lang-css": "^6.3.1",
+    "@codemirror/lang-javascript": "^6.2.4",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lang-markdown": "^6.3.4",
+    "@codemirror/lang-python": "^6.2.1",
+    "@google/generative-ai": "^0.24.1",
+    "@mdxeditor/editor": "^3.42.0",
+    "@tailwindcss/typography": "^0.5.16",
+    "@vercel/blob": "^1.1.1",
     "firebase": "^10.12.4",
+    "firebase-admin": "^13.4.0",
     "jszip": "^3.10.1",
+    "micro": "^10.0.1",
     "mongoose": "^8.15.1",
-    "next": "14.2.5",
-    "pdfjs-dist": "2.6.347",
+    "next": "^15.5.2",
+    "pdf-parse": "^1.1.1",
+    "pdfjs-dist": "^5.4.54",
     "react": "^18",
-    "react-dom": "^18"
+    "react-dom": "^18",
+    "react-markdown": "^10.1.0",
+    "uuid": "^11.1.0",
+    "ytdl-core": "npm:@distube/ytdl-core@^4.16.12"
   },
   "devDependencies": {
     "autoprefixer": "^10.4.21",

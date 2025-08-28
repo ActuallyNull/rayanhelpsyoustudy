@@ -7,114 +7,16 @@ import { onAuthStateChanged } from 'firebase/auth';
 import LoadingSpinner from '@/components/LoadingSpinner';
 import Modal from '@/components/Modal';
 import { useRouter } from 'next/router';
-import JSZip from 'jszip';
 
-// For PDF.js
-let pdfjsLib = null; // Renaming to avoid confusion with the module object
-let pdfjsWorker = null;
-
-if (typeof window !== 'undefined') {
-  // Attempt to import the main PDF.js library
-  import('pdfjs-dist/build/pdf.js') // <--- VERIFY THIS PATH EXISTS IN YOUR node_modules/pdfjs-dist/
-    .then(module => {
-      pdfjsLib = module; // The entire module, getDocument should be on this
-      console.log('PDF.js library loaded successfully:', pdfjsLib);
-
-      // Set up the worker.
-      // The `pdf.worker.entry.js` is often for when you want Webpack to bundle the worker.
-      // If you rely on a CDN, you can directly set workerSrc.
-      if (pdfjsLib && pdfjsLib.GlobalWorkerOptions) {
-        // Make sure to use the version from the loaded library if available
-        const version = pdfjsLib.version || '2.6.347'; // Fallback to your installed version
-        pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${version}/pdf.worker.min.js`;
-        console.log(`PDF.js workerSrc set to CDN: ${pdfjsLib.GlobalWorkerOptions.workerSrc}`);
-      } else {
-        console.warn('pdfjsLib.GlobalWorkerOptions not available after library load.');
-      }
-    })
-    .catch(error => {
-      console.error("Failed to load 'pdfjs-dist/build/pdf.js'. Error:", error);
-      // You could try a fallback import here if necessary, e.g., 'pdfjs-dist/legacy/build/pdf.js'
-      // or just 'pdfjs-dist' if the package.json main points correctly.
-      // For now, let's focus on getting the primary path working.
-    });
-}
-
-// Function to extract text from PPTX
-async function extractTextFromPptx(file) {
-  const zip = new JSZip();
-  const content = await zip.loadAsync(file);
-  let fullText = "";
-
-  // Regex to find text nodes in slide XML: <a:t>TEXT_HERE</a:t>
-  // This is a simplified approach and might need refinement for complex PPTX files
-  // (e.g., text in shapes, tables, SmartArt, notes pages)
-  const textNodeRegex = /<a:t.*?>(.*?)<\/a:t>/g;
-  const notesTextNodeRegex = /<p:txBody>.*?<a:t.*?>(.*?)<\/a:t>.*?<\/p:txBody>/gs; // More specific for notes
-
-  const slidePromises = [];
-  const notesPromises = [];
-
-  // Iterate over slide files (e.g., ppt/slides/slide1.xml, slide2.xml, etc.)
-  for (const filePath in content.files) {
-    if (filePath.startsWith("ppt/slides/slide") && filePath.endsWith(".xml")) {
-      slidePromises.push(content.files[filePath].async("string"));
-    }
-    if (filePath.startsWith("ppt/notesSlides/notesSlide") && filePath.endsWith(".xml")) {
-        notesPromises.push(content.files[filePath].async("string"));
-    }
-  }
-
-  const slideContents = await Promise.all(slidePromises);
-  slideContents.forEach(slideXml => {
-    let match;
-    while ((match = textNodeRegex.exec(slideXml)) !== null) {
-      // Basic unescaping for common XML entities, can be expanded
-      const textContent = match[1]
-                            .replace(/</g, '<')
-                            .replace(/>/g, '>')
-                            .replace(/&/g, '&')
-                            .replace(/"/g, '"')
-                            .replace(/'/g, "'");
-      fullText += textContent + " ";
-    }
-    fullText += "\n"; // Add a newline after each slide's text
-  });
-
-  const notesContents = await Promise.all(notesPromises);
-  if (notesContents.length > 0) {
-    fullText += "\n--- Speaker Notes ---\n";
-    notesContents.forEach(notesXml => {
-        let match;
-        // A more robust way to get all text within txBody for notes
-        const txBodyRegex = /<p:txBody>(.*?)<\/p:txBody>/gs;
-        while((match = txBodyRegex.exec(notesXml)) !== null) {
-            let textContent = "";
-            let innerMatch;
-            while((innerMatch = textNodeRegex.exec(match[1])) !== null) {
-                textContent += innerMatch[1] + " ";
-            }
-            if (textContent.trim()) {
-                 fullText += textContent.trim()
-                                .replace(/</g, '<')
-                                .replace(/>/g, '>')
-                                .replace(/&/g, '&')
-                                .replace(/"/g, '"')
-                                .replace(/'/g, "'") + "\n";
-            }
-        }
-    });
-  }
-
-  return fullText.trim();
-}
+// We no longer need pdfjsLib, JSZip, or client-side PDF/PPTX extraction here.
+// The upload function from @vercel/blob/client is handled implicitly by handleUploadUrl in /api/media/upload.
 
 export default function StudyPage() {
   const router = useRouter();
   const [user, setUser] = useState(null);
   const [userId, setUserId] = useState(null);
+  const [authToken, setAuthToken] = useState(null); // New state to store Firebase ID token
 
-  const [currentStep, setCurrentStep] = useState('upload'); // 'upload', 'category', 'mcq'
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('Processing...');
 
@@ -123,33 +25,23 @@ export default function StudyPage() {
   const [modalMessage, setModalMessage] = useState('');
 
   const [fileName, setFileName] = useState('');
+  const [youtubeUrl, setYoutubeUrl] = useState('');
   const fileInputRef = useRef(null);
-  const [currentPdfText, setCurrentPdfText] = useState(null);
-  const [extractedCategories, setExtractedCategories] = useState([]);
-  const [currentSelectedCategory, setCurrentSelectedCategory] = useState(null);
-
-  // State for current MCQ display
-  const [currentMcq, setCurrentMcq] = useState(null); // Holds the current MCQ object
-  const [currentMcqBatch, setCurrentMcqBatch] = useState([]); // Holds the fetched batch
-  const [currentMcqIndex, setCurrentMcqIndex] = useState(-1); // Index within the batch
-
-  const [isAnswered, setIsAnswered] = useState(false);
-  const [selectedAnswerIndex, setSelectedAnswerIndex] = useState(null); // To style the user's choice
-  const [feedbackText, setFeedbackText] = useState('');
-  const [explanationText, setExplanationText] = useState('');
-  const [questionsAnsweredInCategory, setQuestionsAnsweredInCategory] = useState(0);
-  const [currentSessionId, setCurrentSessionId] = useState(null);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
-      setUserId(currentUser ? currentUser.uid : null);
-      if (currentUser && router.query.sessionId && !currentSessionId) { // Prevent re-loading if already loaded
-        loadSession(router.query.sessionId, currentUser.uid);
+      if (currentUser) {
+        setUserId(currentUser.uid);
+        const token = await currentUser.getIdToken();
+        setAuthToken(token);
+      } else {
+        setUserId(null);
+        setAuthToken(null);
       }
     });
     return () => unsubscribe();
-  }, [router.query.sessionId, currentSessionId]); // Add currentSessionId to dependencies
+  }, []);
 
   const showModal = (title, message) => {
     setModalTitle(title);
@@ -157,448 +49,230 @@ export default function StudyPage() {
     setModalOpen(true);
   };
 
-  const getSetLastDifficulty = (newDifficulty) => {
-    if (typeof window !== 'undefined') {
-        let lastDifficulty = localStorage.getItem('lastDifficulty');
-        if (newDifficulty) {
-            localStorage.setItem('lastDifficulty', newDifficulty);
-            lastDifficulty = newDifficulty;
-        } else if (!lastDifficulty) {
-            lastDifficulty = "medium";
-        }
-        return lastDifficulty;
-    }
-    return "medium";
-  };
-
-  const loadSession = async (sessionId, uid) => {
-    if (!sessionId || !uid) return;
-    setIsLoading(true);
-    setLoadingMessage("Loading session...");
-    try {
-        const res = await fetch(`/api/sessions/${sessionId}`);
-        if (!res.ok) throw new Error("Session not found or error fetching.");
-        const {success, data: session} = await res.json();
-
-        if (!success || !session) throw new Error("Failed to load session data.");
-
-        if (session.userId !== uid) {
-            showModal("Access Denied", "This session does not belong to you.");
-            router.push('/');
-            return;
-        }
-        // Assuming session.pdfText now stores generic file text
-        setCurrentPdfText(session.pdfText); // Use setCurrentPdfText (or rename to setCurrentFileText)
-        
-        let sessionCategories = session.categories || [];
-        if (!sessionCategories.includes("All")) {
-            sessionCategories = ["All", ...sessionCategories];
-        }
-        setExtractedCategories(sessionCategories);
-        setCurrentSessionId(session._id);
-        setFileName(session.fileName);
-        if (session.lastDifficulty) getSetLastDifficulty(session.lastDifficulty);
-
-        setCurrentStep('category');
-    } catch (error) {
-        console.error("Failed to load session:", error);
-        showModal("Session Error", `Could not load session: ${error.message}`);
-        router.push('/');
-    } finally {
-        setIsLoading(false);
-    }
-  };
-
-  const handleFileUpload = async (event) => {
-    if (!userId) {
+  const handleGenerate = async () => {
+    if (!userId || !authToken) {
       showModal("Login Required", "Please sign in to upload files.");
       return;
     }
-    const file = event.target.files[0];
-    if (!file) return;
 
-    setFileName(file.name);
-    setIsLoading(true);
-    let extractedText = "";
-    let fileTypeForAI = "document"; // Generic term for AI prompt
+    const file = fileInputRef.current?.files[0];
 
-    try {
-      if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
-        setLoadingMessage(`Extracting text from PDF: ${file.name}...`);
-        if (!pdfjsLib || !pdfjsLib.getDocument) {
-            showModal("PDF Library Error", "PDF.js library is not ready. Please wait and try again.");
-            setIsLoading(false); return;
-        }
-        const arrayBuffer = await file.arrayBuffer();
-        const pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-        for (let i = 1; i <= pdfDoc.numPages; i++) {
-          const page = await pdfDoc.getPage(i);
-          const textContent = await page.getTextContent();
-          extractedText += textContent.items.map(item => item.str).join(" ") + "\n";
-        }
-        fileTypeForAI = "PDF document";
-      } else if (file.type === "application/vnd.openxmlformats-officedocument.presentationml.presentation" || file.name.toLowerCase().endsWith(".pptx")) {
-        setLoadingMessage(`Extracting text from PowerPoint: ${file.name}...`);
-        extractedText = await extractTextFromPptx(file);
-        fileTypeForAI = "PowerPoint presentation";
-      } else {
-        showModal("Unsupported File Type", "Please upload a PDF (.pdf) or PowerPoint (.pptx) file.");
-        setIsLoading(false); return;
-      }
-
-      setCurrentPdfText(extractedText); // Use this state for the extracted text, regardless of source
-
-      if (!extractedText || extractedText.trim().length < 20) { // Lowered threshold a bit for PPTX
-        showModal("Extraction Error", `Could not extract sufficient text from the ${fileTypeForAI}. It might be image-based or have minimal text content.`);
-        setIsLoading(false); return;
-      }
-
-      setLoadingMessage(`Identifying categories from ${fileTypeForAI}...`);
-      const catResponse = await fetch('/api/ai/categorize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: extractedText }),
-      });
-      let categoriesFromServer = [];
-      if (catResponse.ok) {
-        const catData = await catResponse.json();
-        categoriesFromServer = catData.categories || [];
-      } else {
-        console.warn("AI categorization failed or returned no categories. Defaulting to 'All'.");
-      }
-
-      const finalCategories = ["All", ...categoriesFromServer];
-      setExtractedCategories(finalCategories);
-
-      // --- NEW: Generate flashcards right after categorization ---
-      setLoadingMessage("Generating flashcards...");
-      let flashcards = [];
-      try {
-        const flashRes = await fetch('/api/ai/generate-flashcards', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: extractedText, count: 15 }),
-        });
-        if (flashRes.ok) {
-          const { flashcards: generated } = await flashRes.json();
-          if (Array.isArray(generated)) flashcards = generated;
-        } else {
-          const err = await flashRes.json().catch(() => ({}));
-          console.warn("Flashcard generation failed:", err.error || "Unknown error");
-        }
-      } catch (err) {
-        console.warn("Flashcard generation error:", err);
-      }
-      // --- END NEW ---
-
-      setLoadingMessage("Saving session...");
-      const sessionData = {
-        userId,
-        fileName: file.name,
-        pdfText: extractedText,
-        categories: finalCategories,
-        lastDifficulty: getSetLastDifficulty(),
-        flashcards, // <-- Save flashcards in the session!
-      };
-      const saveRes = await fetch('/api/sessions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(sessionData),
-      });
-      if (!saveRes.ok) throw new Error('Failed to save session.');
-      const {data: savedSession} = await saveRes.json();
-      setCurrentSessionId(savedSession._id);
-
-      setCurrentStep('category');
-
-    } catch (error) {
-      console.error("Error during upload and processing:", error);
-      showModal("Processing Error", `An error occurred: ${error.message}`);
-      setCurrentStep('upload');
-    } finally {
-      setIsLoading(false);
-      if(fileInputRef.current) fileInputRef.current.value = null;
-    }
-  };
-
-  const handleSelectCategory = (category) => {
-    console.log("Category selected:", category);
-    setCurrentSelectedCategory(category);
-    setQuestionsAnsweredInCategory(0);
-    setCurrentMcq(null); // Clear any previous MCQ
-    setCurrentMcqBatch([]);
-    setCurrentMcqIndex(-1);
-    setIsAnswered(false);
-    setSelectedAnswerIndex(null);
-    setFeedbackText('');
-    setExplanationText('');
-    setCurrentStep('mcq');
-    // User will click a difficulty button to fetch MCQs
-  };
-
-  const fetchAndDisplayMcqs = async (difficulty) => {
-    console.log("Fetching MCQs for category:", currentSelectedCategory, "difficulty:", difficulty);
-    if (!currentPdfText || !currentSelectedCategory) {
-      showModal("Error", "Missing extracted text or category selection.");
-      setCurrentStep('category'); // Sensible fallback
+    if (!file && !youtubeUrl) {
+      showModal("Input Required", "Please select a file or enter a YouTube URL.");
       return;
     }
+
     setIsLoading(true);
-    setLoadingMessage(`Fetching questions for "${currentSelectedCategory}" (${difficulty})...`);
-    setIsAnswered(false);
-    setSelectedAnswerIndex(null);
-    setCurrentMcq(null); // Clear current MCQ while loading
 
-    const categoryForPrompt = currentSelectedCategory === "All" ? "the entire document" : currentSelectedCategory;
-    const requestBody = {
-        text: currentPdfText,
-        // If "All" is selected, tell the AI to use the whole document context.
-        // Otherwise, use the specific category.
-        category: categoryForPrompt,
-        difficulty,
-        count: 3
-    };
+    if (youtubeUrl) {
+      setLoadingMessage('Processing YouTube URL...');
+      await processMediaAndCreateJob({ type: 'youtube', identifier: youtubeUrl });
+    } else if (file) {
+      setFileName(file.name);
+      setLoadingMessage('Uploading file...');
+      await processMediaAndCreateJob({ type: 'file', file });
+    }
+  };
 
-    console.log("Requesting MCQs with body:", requestBody); // For debugging
-
+  const processMediaAndCreateJob = async ({ type, identifier, file }) => {
     try {
-      const mcqResponse = await fetch('/api/ai/generate-mcqs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody), // Use the modified requestBody
-      });
+        let jobId = null;
 
-      if (!mcqResponse.ok) {
-        const errData = await mcqResponse.json().catch(() => ({ error: 'Failed to generate MCQs and parse error response.' }));
-        throw new Error(errData.error || 'Failed to generate MCQs.');
-      }
-      const { mcqs } = await mcqResponse.json();
+        if (type === 'file') {
+            // For file uploads, we call our /api/media/upload endpoint
+            // The /api/media/upload endpoint will then call /api/media/process
+            // It needs the raw file data and the auth token.
+            const uploadHeaders = new Headers();
+            uploadHeaders.set('Authorization', `Bearer ${authToken}`);
 
-      if (mcqs && mcqs.length > 0) {
-        console.log("Fetched MCQs:", mcqs);
-        setCurrentMcqBatch(mcqs);
-        setCurrentMcqIndex(0);
-        setCurrentMcq(mcqs[0]); // Set the first MCQ from the new batch
-      } else {
-        console.log("No MCQs returned from API.");
-        setCurrentMcqBatch([]);
-        setCurrentMcqIndex(-1);
-        setCurrentMcq(null);
-        showModal("No More Questions", "AI couldn't generate new questions for this category/difficulty. Try another option or category.");
-      }
+            const response = await fetch('/api/media/upload', {
+                method: 'POST',
+                headers: uploadHeaders,
+                body: file, // Send the raw file directly
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || 'Failed to upload file.');
+            }
+
+            // The /api/media/upload response contains blob info, but not the jobId directly
+            // The jobId will be established in /api/media/process, which is triggered by /api/media/upload
+            // We'll need to poll for status using the blob URL or wait for the process API to return a jobId
+            // For simplicity, we'll assume /api/media/upload returns a jobId from its internal call to process.js
+            // Or we will poll the user's jobs for a pending/processing job matching this identifier
+            // (Current setup for process.js means it creates the job and returns jobId, but upload.js doesn't forward it directly yet.)
+            // Let's modify upload.js to return the jobId from process.js's response.
+            // For now, we will poll for the status of ALL user jobs and look for one with matching identifier
+            setLoadingMessage('File uploaded. Waiting for processing to start...');
+            // This is a temporary polling strategy, the ideal is for /api/media/upload to return jobId
+            jobId = await findJobIdByUrlPolling(identifier.name || file.name, authToken); // Pass the original file name/identifier
+            if (!jobId) throw new Error("Could not find a matching job to poll.");
+
+
+        } else if (type === 'youtube') {
+            // For YouTube URLs, directly call /api/media/process
+            setLoadingMessage('Submitting YouTube URL for processing...');
+            const processResponse = await fetch('/api/media/process', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${authToken}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ type, identifier }),
+            });
+
+            if (!processResponse.ok) {
+                const errorData = await processResponse.json();
+                throw new Error(errorData.error || 'Failed to start YouTube processing.');
+            }
+            const data = await processResponse.json();
+            jobId = data.jobId;
+        }
+
+        if (jobId) {
+            pollJobStatus(jobId, authToken);
+        } else {
+            throw new Error("No job ID received to start polling.");
+        }
+
     } catch (error) {
-      console.error("Error fetching MCQs:", error);
-      showModal("AI Error", `Failed to get MCQs: ${error.message}`);
-      setCurrentMcq(null);
+        console.error('Error initiating media job:', error);
+        showModal("Processing Error", `An error occurred: ${error.message}`);
+        setIsLoading(false);
     } finally {
-      setIsLoading(false);
+        if(fileInputRef.current) fileInputRef.current.value = null; // Clear file input
+        setYoutubeUrl(''); // Clear YouTube URL input
     }
   };
 
-  const handleAnswer = (selectedIndex) => {
-    if (isAnswered || !currentMcq) return;
 
-    setIsAnswered(true);
-    setSelectedAnswerIndex(selectedIndex);
+  // Helper to find jobId for uploaded files if /api/media/upload doesn't return it directly
+  const findJobIdByUrlPolling = async (originalIdentifier, token) => {
+    let attempts = 0;
+    const maxAttempts = 10;
+    const pollInterval = 3000; // Poll every 3 seconds
 
-    if (selectedIndex === currentMcq.correctOptionIndex) {
-      setFeedbackText("Correct!");
-    } else {
-      setFeedbackText("Incorrect!");
-    }
-    setExplanationText(`Explanation: ${currentMcq.explanation}`);
-    setQuestionsAnsweredInCategory(prev => prev + 1);
+    return new Promise((resolve) => {
+      const interval = setInterval(async () => {
+        if (attempts >= maxAttempts) {
+          clearInterval(interval);
+          resolve(null);
+          return;
+        }
+        attempts++;
+        try {
+          const res = await fetch(`/api/user-media-jobs?userId=${userId}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          if (!res.ok) throw new Error('Failed to fetch user jobs for polling.');
+          const { success, data: jobs } = await res.json();
+          if (success && jobs) {
+            // Look for a job that is 'pending' or 'processing' with the matching identifier
+            // The identifier from /api/media/process will be the Vercel Blob URL, not the original filename
+            // We need a way to link them, or pass jobId back from /api/media/upload
+            // For now, let's assume 'identifier' might contain the original fileName in its URL or we match by fileName.
+            // A more robust solution would be to have /api/media/upload return the jobId.
+            const matchedJob = jobs.find(job =>
+                (job.type === 'file' && job.fileName === originalIdentifier) &&
+                (job.status === 'pending' || job.status === 'processing')
+            );
+
+            if (matchedJob) {
+              clearInterval(interval);
+              resolve(matchedJob._id);
+            }
+          }
+        } catch (error) {
+          console.error("Polling for jobId failed:", error);
+        }
+      }, pollInterval);
+    });
   };
 
-  const handleNextQuestion = () => {
-    if (!isAnswered && currentMcqIndex >= 0 && currentMcqBatch.length > 0) {
-        showModal("Answer Required", "Please select an answer first.");
-        return;
-    }
 
-    const nextIndex = currentMcqIndex + 1;
-    if (nextIndex >= currentMcqBatch.length) {
-      console.log("End of batch, fetching more.");
-      const currentDifficulty = getSetLastDifficulty();
-      fetchAndDisplayMcqs(currentDifficulty);
-    } else {
-      console.log("Displaying next MCQ from batch, index:", nextIndex);
-      setCurrentMcqIndex(nextIndex);
-      setCurrentMcq(currentMcqBatch[nextIndex]);
-      // Reset for the new question
-      setIsAnswered(false);
-      setSelectedAnswerIndex(null);
-      setFeedbackText('');
-      setExplanationText('');
-    }
+  const pollJobStatus = async (jobId, token) => {
+    setLoadingMessage('Starting processing...');
+    const interval = setInterval(async () => {
+        try {
+            const res = await fetch(`/api/media/status?jobId=${jobId}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+
+            if (!res.ok) throw new Error('Could not fetch job status.');
+
+            const data = await res.json();
+            setLoadingMessage(data.status);
+
+            if (data.status === 'completed' || data.status === 'failed') {
+                clearInterval(interval);
+                setIsLoading(false);
+                if (data.status === 'completed') {
+                    router.push(`/document/${jobId}`); // Redirect to the new document detail page
+                } else {
+                    showModal("Processing Failed", "Failed to process the media.");
+                }
+            }
+        } catch (error) {
+            console.error('Polling error:', error);
+            clearInterval(interval);
+            setIsLoading(false);
+            showModal("Polling Error", "Error checking job status.");
+        }
+    }, 3000); // Poll every 3 seconds
   };
-
-  console.log("Rendering page. Current step:", currentStep, "isLoading:", isLoading, "currentMcq:", currentMcq);
 
   return (
     <>
       <Head>
-        <title>Study Dashboard - Rayan Helps You Study</title>
+        <title>Upload & Study - Rayan Helps You Study</title>
       </Head>
       <div className="container mx-auto px-4 py-8">
-        <div className="bg-white p-6 md:p-8 rounded-xl shadow-xl min-h-[60vh]"> {/* min-h for consistent size */}
+        <div className="bg-white p-6 md:p-8 rounded-xl shadow-xl min-h-[60vh]">
           {isLoading && <LoadingSpinner message={loadingMessage} />}
 
-          {/* Upload Step */}
-          {!isLoading && currentStep === 'upload' && (
+          {!isLoading && !user && (
+            <p className="text-red-600 text-center p-10">⚠️ Please sign in to upload and process documents.</p>
+          )}
+
+          {!isLoading && user && (
             <div>
-              <h2 className="text-2xl font-semibold mb-4 text-gray-700">Upload Your Notes (PDF or PPTX)</h2>
+              <h2 className="text-2xl font-semibold mb-4 text-gray-700">Upload Your Notes or Media</h2>
               <input
                 type="file"
-                accept=".pdf,application/pdf,.pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                onChange={handleFileUpload}
+                accept=".pdf,.pptx,.mp3,.mp4,.webm" // Added webm for video
+                onChange={(e) => setFileName(e.target.files[0]?.name || '')}
                 ref={fileInputRef}
                 className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 mb-4"
               />
-              {fileName && <p className="mt-3 text-sm text-gray-600">Selected: {fileName}</p>}
-            </div>
-          )}
-
-          {/* Category Step */}
-          {!isLoading && currentStep === 'category' && (
-            <div>
-              <h2 className="text-2xl font-semibold mb-4 text-gray-700">Select a Category</h2>
-              {extractedCategories.length > 0 ? (
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-                  {extractedCategories.map(cat => (
-                    <button key={cat} onClick={() => handleSelectCategory(cat)}
-                      className="w-full bg-white hover:bg-blue-50 text-blue-700 font-semibold py-3 px-4 border border-blue-200 rounded-lg shadow transition duration-150 ease-in-out text-left">
-                      {cat}
-                    </button>
-                  ))}
+              {fileName && <p className="mt-3 text-sm text-gray-600">Selected: {fileName}</p>}<div className="relative my-6">
+                    <div className="absolute inset-0 flex items-center" aria-hidden="true">
+                        <div className="w-full border-t border-gray-300" />
+                    </div>
+                    <div className="relative flex justify-center">
+                        <span className="bg-white px-2 text-sm text-gray-500">Or</span>
+                    </div>
                 </div>
-              ) : (
-                <p className="text-gray-500">No categories identified. Please try a different file or check the console for errors during processing.</p>
-              )}
-              <button onClick={() => {
-                setCurrentStep('upload');
-                setFileName('');
-                setCurrentPdfText(null);
-                setExtractedCategories([]);
-                setCurrentSessionId(null);
-                setCurrentMcq(null);
-                setCurrentMcqBatch([]);
-                setCurrentMcqIndex(-1);
-                setQuestionsAnsweredInCategory(0);
-                setIsAnswered(false);
-                setFeedbackText('');
-                setExplanationText('');
-              }} className="mt-6 bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg">
-                Upload New File
+
+                <div className="mb-4">
+                    <label htmlFor="youtube-url" className="block text-sm font-medium text-gray-700">YouTube URL</label>
+                    <input type="url" name="youtube-url" id="youtube-url" value={youtubeUrl} onChange={(e) => setYoutubeUrl(e.target.value)} className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" placeholder="https://www.youtube.com/watch?v=..." />
+                </div>
+
+              <button
+                onClick={handleGenerate}
+                className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50"
+                disabled={isLoading}
+              >
+                Generate Study Material
               </button>
 
-              {/* --- FLASHCARDS BUTTON IN CATEGORY STEP (Stays Here) --- */}
-              {currentSessionId && currentPdfText && (
-                <div className="mt-8 pt-6 border-t border-gray-200 text-center">
-                  <Link href={`/flashcards?sessionId=${currentSessionId}`} legacyBehavior>
-                    <a className="bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-3 px-6 rounded-lg text-lg transition duration-150 ease-in-out">
-                      🧠 Generate Flashcards for This Document
-                    </a>
-                  </Link>
-                </div>
-              )}
-              {/* --- END FLASHCARDS BUTTON IN CATEGORY STEP --- */}
-            </div>
-          )}
-
-          {/* MCQ Step */}
-          {!isLoading && currentStep === 'mcq' && (
-              <div id="mcq-step">
-                  <div className="flex justify-between items-center mb-4">
-                      <h2 className="text-2xl font-semibold text-gray-700">
-                          MCQs: {currentSelectedCategory || "No Category Selected"}
-                      </h2>
-                      <button onClick={() => {
-                          setCurrentMcq(null);
-                          setCurrentMcqBatch([]);
-                          setCurrentMcqIndex(-1);
-                          setIsAnswered(false);
-                          setSelectedAnswerIndex(null);
-                          setFeedbackText('');
-                          setExplanationText('');
-                          setQuestionsAnsweredInCategory(0);
-                          setCurrentStep('category');
-                      }} className="bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg text-sm">
-                          Change Category
-                      </button>
-                  </div>
-
-                  <div className="flex space-x-2 mt-4 mb-6 justify-center">
-                      {["easy", "medium", "hard", "ministerial"].map(diff => (
-                          <button
-                              key={diff}
-                              onClick={() => {
-                                  getSetLastDifficulty(diff);
-                                  fetchAndDisplayMcqs(diff);
-                              }}
-                              className={`font-medium py-2 px-4 rounded-lg shadow-sm transition-colors
-                                  ${getSetLastDifficulty() === diff
-                                      ? (diff === "easy" ? "bg-green-500 text-white" :
-                                        diff === "medium" ? "bg-yellow-500 text-white" :
-                                        diff === "hard" ? "bg-red-500 text-white" :
-                                        "bg-purple-500 text-white")
-                                      : "bg-gray-200 hover:bg-gray-300 text-gray-700"
-                                  }
-                              `}
-                          >
-                              {diff.charAt(0).toUpperCase() + diff.slice(1)}
-                          </button>
-                      ))}
-                  </div>
-
-                  {currentMcq && (
-                      <div id="mcq-content" className="p-6 bg-gray-50 rounded-lg shadow">
-                          <p className="text-lg font-medium text-gray-800 mb-6">{currentMcq.questionText}</p>
-                          <div className="space-y-3 mb-6">
-                              {currentMcq.options.map((option, index) => (
-                                  <button
-                                      key={index}
-                                      onClick={() => handleAnswer(index)}
-                                      disabled={isAnswered}
-                                      className={`w-full option-button text-left py-3 px-4 border rounded-lg shadow-sm transition-all
-                                          ${isAnswered ?
-                                              (index === currentMcq.correctOptionIndex ? 'bg-green-500 !text-white border-green-600' : 
-                                              (index === selectedAnswerIndex ? 'bg-red-500 !text-white border-red-600' : 
-                                              'bg-gray-100 text-gray-800 border-gray-300')) 
-                                              : 'bg-gray-100 hover:bg-gray-200 text-gray-800 border-gray-300'
-                                          }
-                                          ${isAnswered ? 'cursor-not-allowed' : 'cursor-pointer'}
-                                      `}
-                                  >
-                                      {option}
-                                  </button>
-                              ))}
-                          </div>
-                          <div className="mb-4 min-h-[2.5em]">
-                              <p className={`text-md font-medium ${feedbackText === "Correct!" ? "text-green-600" : "text-red-600"}`}>{feedbackText}</p>
-                              {explanationText && <p className="text-sm text-gray-600 mt-1">{explanationText}</p>}
-                          </div>
-                          <button
-                              onClick={handleNextQuestion}
-                              disabled={!isAnswered && currentMcqIndex >=0 && currentMcqBatch.length > 0}
-                              className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-lg transition duration-150 ease-in-out disabled:opacity-50"
-                          >
-                              Next Question
-                          </button>
-                      </div>
-                  )}
-                  {!isLoading && currentStep === 'mcq' && !currentMcq && (
-                      <p className="text-center text-gray-500 mt-10">
-                          Please select a difficulty level above to generate questions for "{currentSelectedCategory || 'the selected category'}".
-                      </p>
-                  )}
-
-                  {currentStep === 'mcq' && ( 
-                      <p className="text-sm text-gray-500 mt-4 text-center">
-                          Questions answered in this category: {questionsAnsweredInCategory}
-                      </p>
-                  )}
+              <div className="mt-6 text-center">
+                <Link href="/dashboard" legacyBehavior>
+                  <a className="text-blue-600 hover:underline">View Your Documents Dashboard</a>
+                </Link>
               </div>
+            </div>
           )}
         </div>
       </div>

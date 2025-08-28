@@ -5,6 +5,7 @@ import { useRouter } from 'next/router';
 
 const navItems = [
   { href: '/', label: 'Home', /*icon: <FaHome />*/ },
+  { href: '/dashboard', label: 'My Documents', /*icon: <FaFileUpload />*/ },
   { href: '/study', label: 'Study Dashboard', /*icon: <FaFileUpload />*/ },
   { href: '/sessions', label: 'My Sessions', /*icon: <FaListAlt />*/ },
   { href: '/flashcards', label: 'Flashcards', /*icon: <FaChalkboardTeacher />*/ },
